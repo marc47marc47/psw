@@ -69,6 +69,11 @@ jobs:
             [ "$(echo "$out" | wc -l)" -ge 2 ] || fail "psw $opt: no rows"
           done
 
+          echo "--- no doubled brackets / 1970 start times in -e -l -f"
+          out=$("$PSW" -e -l -f)
+          echo "$out" | grep -q '\[\[System Process\]\]' && fail "doubled brackets in CMD"
+          echo "$out" | grep -q 'Jan01' && fail "unknown start time shown as Jan01"
+
           echo "--- psw -e must contain this runner's own shell and psw's parent chain"
           "$PSW" -e | grep -qi 'bash\|pwsh\|powershell\|cmd' || fail "no shell process in -e output"
 

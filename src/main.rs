@@ -148,13 +148,25 @@ fn format_cpu_time(millis: u64) -> String {
 
 /// `HH:MM` for processes started today, `MonDD` otherwise (like `ps`).
 fn format_start_time(start_epoch_secs: u64, now: DateTime<Local>) -> String {
-    let Ok(secs) = i64::try_from(start_epoch_secs) else {
-        return "-".to_string();
+    // 0 means "unknown" (e.g. the Windows "System Process", PID 0), not 1970-01-01.
+    let secs = match i64::try_from(start_epoch_secs) {
+        Ok(secs) if secs > 0 => secs,
+        _ => return "-".to_string(),
     };
     match Local.timestamp_opt(secs, 0).single() {
         Some(t) if t.date_naive() == now.date_naive() => t.format("%H:%M").to_string(),
         Some(t) => t.format("%b%d").to_string(),
         None => "-".to_string(),
+    }
+}
+
+/// `[name]` for processes without a command line (ps convention); Windows already reports some
+/// names in brackets (`[System Process]`), which must not be doubled.
+fn bracketed(name: &str) -> String {
+    if name.starts_with('[') && name.ends_with(']') {
+        name.to_string()
+    } else {
+        format!("[{name}]")
     }
 }
 
@@ -164,7 +176,7 @@ fn format_cmd(process: &Process, full: bool) -> String {
         return name.into_owned();
     }
     if process.cmd().is_empty() {
-        return format!("[{name}]");
+        return bracketed(&name);
     }
     process
         .cmd()
@@ -429,6 +441,14 @@ mod tests {
         assert_eq!(format_start_time(today, now), "08:05");
         assert_eq!(format_start_time(older, now), "Mar01");
         assert_eq!(format_start_time(u64::MAX, now), "-");
+        assert_eq!(format_start_time(0, now), "-");
+    }
+
+    #[test]
+    fn bracketed_names() {
+        assert_eq!(bracketed("kthreadd"), "[kthreadd]");
+        assert_eq!(bracketed("[System Process]"), "[System Process]");
+        assert_eq!(bracketed("[x"), "[[x]");
     }
 
     #[test]
