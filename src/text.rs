@@ -54,7 +54,9 @@ pub fn wrap_to_width(s: &str, first: usize, rest: usize) -> Vec<String> {
 
 /// Control characters (newlines, tabs, ESC...) in names/command lines would corrupt the layout.
 pub fn sanitize(s: &str) -> String {
-    s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect()
+    s.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
 }
 
 #[cfg(test)]

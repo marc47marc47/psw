@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "claude/**"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+          rustc --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets
+
+      - name: Unit tests
+        run: cargo test
+
+      - name: Build release
+        run: cargo build --release
+
+      # Smoke tests against the real OS process table (this is the only place the
+      # Windows code path of sysinfo is exercised).
+      - name: Smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          PSW=./target/release/psw
+          [ -x "$PSW.exe" ] && PSW="$PSW.exe"
+
+          fail() { echo "SMOKE FAIL: $*"; exit 1; }
+
+          echo "--- psw (current user)"
+          out=$("$PSW"); echo "$out" | head -5
+          echo "$out" | head -1 | grep -q '^ *PID TIME *CMD' || fail "default header"
+          [ "$(echo "$out" | wc -l)" -ge 2 ] || fail "no processes listed"
+
+          for opt in -e -f -l "-e -l -f"; do
+            echo "--- psw $opt"
+            out=$("$PSW" $opt); echo "$out" | head -3
+            [ "$(echo "$out" | wc -l)" -ge 2 ] || fail "psw $opt: no rows"
+          done
+
+          echo "--- psw -e must contain this runner's own shell and psw's parent chain"
+          "$PSW" -e | grep -qi 'bash\|pwsh\|powershell\|cmd' || fail "no shell process in -e output"
+
+          echo "--- psw tree -sp (ancestors of psw itself)"
+          out=$("$PSW" tree -sp); echo "$out"
+          [ "$(echo "$out" | wc -l)" -ge 3 ] || fail "tree -s: ancestor chain too short"
+          echo "$out" | tail -1 | grep -qi 'psw' || fail "tree -s: last line must be psw itself"
+          echo "$out" | tail -1 | grep -q "($$)\|([0-9]\+)" || fail "tree -p: pid missing"
+
+          echo "--- psw tree -nlaps (pstree flags, piped => no truncation)"
+          "$PSW" tree -nlaps | head -5
+          "$PSW" tree -nlaps | tail -1 | grep -qi 'psw' || fail "tree -nlaps: psw line missing or truncated"
+
+          echo "--- psw tree -sA <name> (ASCII, by name)"
+          out=$("$PSW" tree -sA psw); echo "$out"
+          echo "$out" | grep -q '`-' || fail "ascii drawing missing"
+
+          echo "--- error paths"
+          if "$PSW" tree -s 4294967290 >/dev/null 2>&1; then fail "unknown pid must fail"; fi
+          set +e; "$PSW" -e tree >/dev/null 2>&1; rc=$?; set -e
+          [ "$rc" -eq 2 ] || fail "mixing list and tree options must exit 2 (got $rc)"

@@ -138,7 +138,12 @@ fn columns_for(cli: &Cli) -> Vec<Column> {
 /// `HH:MM:SS` from milliseconds (hours are not wrapped at 24).
 fn format_cpu_time(millis: u64) -> String {
     let total = millis / 1000;
-    format!("{:02}:{:02}:{:02}", total / 3600, (total % 3600) / 60, total % 60)
+    format!(
+        "{:02}:{:02}:{:02}",
+        total / 3600,
+        (total % 3600) / 60,
+        total % 60
+    )
 }
 
 /// `HH:MM` for processes started today, `MonDD` otherwise (like `ps`).
@@ -187,7 +192,9 @@ fn cell(col: Column, pid: &Pid, p: &Process, ctx: &RowContext) -> String {
             None => "-".to_string(),
         },
         Column::Pid => pid.to_string(),
-        Column::Ppid => p.parent().map_or_else(|| "-".to_string(), |pp| pp.to_string()),
+        Column::Ppid => p
+            .parent()
+            .map_or_else(|| "-".to_string(), |pp| pp.to_string()),
         Column::Cpu => format!("{:.1}", p.cpu_usage()),
         Column::Rss => (p.memory() / 1024).to_string(),
         Column::Stime => format_start_time(p.start_time(), ctx.now),
@@ -264,7 +271,11 @@ fn run_list(cli: &Cli) -> ExitCode {
     let mut procs: Vec<(&Pid, &Process)> = sys
         .processes()
         .iter()
-        .filter(|(_, p)| current_uid.as_ref().is_none_or(|uid| p.user_id() == Some(uid)))
+        .filter(|(_, p)| {
+            current_uid
+                .as_ref()
+                .is_none_or(|uid| p.user_id() == Some(uid))
+        })
         .collect();
     procs.sort_by_key(|(pid, _)| **pid);
 
@@ -349,9 +360,22 @@ fn run_tree(args: &TreeArgs) -> ExitCode {
         None
     };
 
-    let style = Style { show_pids: args.show_pids, show_args: args.arguments, ascii: args.ascii };
-    let layout = Layout { width: terminal_width(), wrap: args.long };
-    write_lines(&tree::render_tree(&nodes, &forest, keep.as_deref(), style, layout))
+    let style = Style {
+        show_pids: args.show_pids,
+        show_args: args.arguments,
+        ascii: args.ascii,
+    };
+    let layout = Layout {
+        width: terminal_width(),
+        wrap: args.long,
+    };
+    write_lines(&tree::render_tree(
+        &nodes,
+        &forest,
+        keep.as_deref(),
+        style,
+        layout,
+    ))
 }
 
 fn main() -> ExitCode {
@@ -359,7 +383,9 @@ fn main() -> ExitCode {
     match &cli.command {
         Some(Command::Tree(args)) => {
             if cli.all || cli.long || cli.full {
-                eprintln!("psw: -e/-l/-f apply to the list view; use the tree options after `tree`");
+                eprintln!(
+                    "psw: -e/-l/-f apply to the list view; use the tree options after `tree`"
+                );
                 return ExitCode::from(2);
             }
             run_tree(args)
@@ -373,7 +399,12 @@ mod tests {
     use super::*;
 
     fn cli(e: bool, l: bool, f: bool) -> Cli {
-        Cli { all: e, long: l, full: f, command: None }
+        Cli {
+            all: e,
+            long: l,
+            full: f,
+            command: None,
+        }
     }
 
     #[test]
@@ -387,8 +418,14 @@ mod tests {
     #[test]
     fn start_time_today_vs_older() {
         let now = Local.with_ymd_and_hms(2026, 3, 15, 12, 0, 0).unwrap();
-        let today = Local.with_ymd_and_hms(2026, 3, 15, 8, 5, 0).unwrap().timestamp() as u64;
-        let older = Local.with_ymd_and_hms(2026, 3, 1, 8, 5, 0).unwrap().timestamp() as u64;
+        let today = Local
+            .with_ymd_and_hms(2026, 3, 15, 8, 5, 0)
+            .unwrap()
+            .timestamp() as u64;
+        let older = Local
+            .with_ymd_and_hms(2026, 3, 1, 8, 5, 0)
+            .unwrap()
+            .timestamp() as u64;
         assert_eq!(format_start_time(today, now), "08:05");
         assert_eq!(format_start_time(older, now), "Mar01");
         assert_eq!(format_start_time(u64::MAX, now), "-");
@@ -398,9 +435,15 @@ mod tests {
     fn column_selection() {
         use Column::*;
         assert_eq!(columns_for(&cli(false, false, false)), vec![Pid, Time, Cmd]);
-        assert_eq!(columns_for(&cli(true, false, false)), columns_for(&cli(false, false, true)));
+        assert_eq!(
+            columns_for(&cli(true, false, false)),
+            columns_for(&cli(false, false, true))
+        );
         assert_eq!(columns_for(&cli(false, true, false)).len(), 9);
-        assert_eq!(columns_for(&cli(true, true, true)), columns_for(&cli(false, true, false)));
+        assert_eq!(
+            columns_for(&cli(true, true, true)),
+            columns_for(&cli(false, true, false))
+        );
         assert!(!cli(false, false, false).wants_cpu_percent());
         assert!(cli(true, false, false).wants_cpu_percent());
         assert!(!cli(true, false, false).wants_full_cmdline());
@@ -411,8 +454,16 @@ mod tests {
     fn table_alignment() {
         let cols = [Column::Pid, Column::Time, Column::Cmd];
         let rows = vec![
-            vec!["4".to_string(), "00:00:01".to_string(), "System".to_string()],
-            vec!["12345".to_string(), "01:00:00".to_string(), "a b c".to_string()],
+            vec![
+                "4".to_string(),
+                "00:00:01".to_string(),
+                "System".to_string(),
+            ],
+            vec![
+                "12345".to_string(),
+                "01:00:00".to_string(),
+                "a b c".to_string(),
+            ],
         ];
         assert_eq!(
             render_table(&cols, &rows),

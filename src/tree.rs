@@ -70,9 +70,15 @@ pub fn build_forest(nodes: &[TreeNode], numeric_sort: bool) -> Forest {
         }
     }
 
-    children.iter_mut().for_each(|c| sort_siblings(nodes, numeric_sort, c));
+    children
+        .iter_mut()
+        .for_each(|c| sort_siblings(nodes, numeric_sort, c));
 
-    Forest { parent, children, numeric_sort }
+    Forest {
+        parent,
+        children,
+        numeric_sort,
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -97,7 +103,10 @@ impl Selector {
 
 fn normalize_name(s: &str) -> String {
     let lower = s.to_lowercase();
-    lower.strip_suffix(".exe").map(str::to_string).unwrap_or(lower)
+    lower
+        .strip_suffix(".exe")
+        .map(str::to_string)
+        .unwrap_or(lower)
 }
 
 /// Resolves the `-s` selector to node indexes.
@@ -107,10 +116,20 @@ pub fn find_targets(
     self_pid: Option<u32>,
 ) -> Result<Vec<usize>, String> {
     let found: Vec<usize> = match sel {
-        Selector::Pid(pid) => nodes.iter().enumerate().filter(|(_, n)| n.pid == *pid).map(|(i, _)| i).collect(),
+        Selector::Pid(pid) => nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.pid == *pid)
+            .map(|(i, _)| i)
+            .collect(),
         Selector::SelfProcess => {
             let pid = self_pid.ok_or("cannot determine the current process id")?;
-            nodes.iter().enumerate().filter(|(_, n)| n.pid == pid).map(|(i, _)| i).collect()
+            nodes
+                .iter()
+                .enumerate()
+                .filter(|(_, n)| n.pid == pid)
+                .map(|(i, _)| i)
+                .collect()
         }
         Selector::Name(name) => {
             let want = normalize_name(name);
@@ -126,7 +145,9 @@ pub fn find_targets(
         Err(match sel {
             Selector::Pid(pid) => format!("no process with PID {pid}"),
             Selector::Name(name) => format!("no process named '{name}'"),
-            Selector::SelfProcess => "the current process was not found in the process list".to_string(),
+            Selector::SelfProcess => {
+                "the current process was not found in the process list".to_string()
+            }
         })
     } else {
         Ok(found)
@@ -223,7 +244,13 @@ fn layout_label(prefix: &str, cont: &str, label: &str, layout: Layout) -> Vec<St
             wrap_to_width(label, first, rest)
                 .into_iter()
                 .enumerate()
-                .map(|(i, part)| if i == 0 { format!("{prefix}{part}") } else { format!("{cont}{part}") })
+                .map(|(i, part)| {
+                    if i == 0 {
+                        format!("{prefix}{part}")
+                    } else {
+                        format!("{cont}{part}")
+                    }
+                })
                 .collect()
         }
     }
@@ -254,16 +281,31 @@ pub fn render_tree(
 
     let mut out = Vec::with_capacity(nodes.len());
     while let Some((i, prefix, cont, child_cp)) = stack.pop() {
-        out.extend(layout_label(&prefix, &cont, &node_label(&nodes[i], style), layout));
+        out.extend(layout_label(
+            &prefix,
+            &cont,
+            &node_label(&nodes[i], style),
+            layout,
+        ));
 
-        let kids: Vec<usize> = forest.children[i].iter().copied().filter(|&c| visible(c)).collect();
+        let kids: Vec<usize> = forest.children[i]
+            .iter()
+            .copied()
+            .filter(|&c| visible(c))
+            .collect();
         for (pos, &c) in kids.iter().enumerate().rev() {
             let is_last = pos + 1 == kids.len();
             stack.push((
                 c,
                 format!("{child_cp}{}", if is_last { g.last } else { g.branch }),
-                format!("{child_cp}{}", if is_last { g.blank_cont } else { g.bar_cont }),
-                format!("{child_cp}{}", if is_last { g.blank_child } else { g.bar_child }),
+                format!(
+                    "{child_cp}{}",
+                    if is_last { g.blank_cont } else { g.bar_cont }
+                ),
+                format!(
+                    "{child_cp}{}",
+                    if is_last { g.blank_child } else { g.bar_child }
+                ),
             ));
         }
     }
@@ -275,14 +317,29 @@ mod tests {
     use super::*;
 
     fn n(pid: u32, ppid: Option<u32>, start: u64, name: &str) -> TreeNode {
-        TreeNode { pid, ppid, start, name: name.to_string(), args: String::new() }
+        TreeNode {
+            pid,
+            ppid,
+            start,
+            name: name.to_string(),
+            args: String::new(),
+        }
     }
 
-    const PLAIN: Style = Style { show_pids: false, show_args: false, ascii: false };
-    const NOCUT: Layout = Layout { width: None, wrap: false };
+    const PLAIN: Style = Style {
+        show_pids: false,
+        show_args: false,
+        ascii: false,
+    };
+    const NOCUT: Layout = Layout {
+        width: None,
+        wrap: false,
+    };
 
     fn roots(f: &Forest) -> Vec<usize> {
-        (0..f.parent.len()).filter(|&i| f.parent[i].is_none()).collect()
+        (0..f.parent.len())
+            .filter(|&i| f.parent[i].is_none())
+            .collect()
     }
 
     fn sample() -> Vec<TreeNode> {
@@ -316,7 +373,11 @@ mod tests {
         let mut nodes = sample();
         nodes[3].args = "-l".to_string();
         let f = build_forest(&nodes, true);
-        let style = Style { show_pids: true, show_args: true, ascii: false };
+        let style = Style {
+            show_pids: true,
+            show_args: true,
+            ascii: false,
+        };
         assert_eq!(
             render_tree(&nodes, &f, None, style, NOCUT),
             vec![
@@ -327,7 +388,11 @@ mod tests {
                 "  └─Auditd,30",
             ]
         );
-        let style = Style { show_pids: true, show_args: false, ascii: true };
+        let style = Style {
+            show_pids: true,
+            show_args: false,
+            ascii: true,
+        };
         let lines = render_tree(&nodes, &f, None, style, NOCUT);
         assert_eq!(lines[1], "  |-sshd(20)");
         assert_eq!(lines[2], "  |   |-bash(21)");
@@ -339,7 +404,10 @@ mod tests {
         let nodes = vec![n(5, Some(999), 10, "orphan"), n(6, Some(5), 11, "kid")];
         let f = build_forest(&nodes, false);
         assert_eq!(roots(&f), vec![0]);
-        assert_eq!(render_tree(&nodes, &f, None, PLAIN, NOCUT), vec!["orphan", "  └─kid"]);
+        assert_eq!(
+            render_tree(&nodes, &f, None, PLAIN, NOCUT),
+            vec!["orphan", "  └─kid"]
+        );
     }
 
     #[test]
@@ -353,7 +421,10 @@ mod tests {
     fn reused_parent_pid_is_rejected() {
         // pid 10 was started at t=100, but the "child" claims it as parent and started at t=50:
         // the real parent died and its PID was reused by an unrelated, younger process.
-        let nodes = vec![n(10, None, 100, "new-unrelated"), n(11, Some(10), 50, "old-child")];
+        let nodes = vec![
+            n(10, None, 100, "new-unrelated"),
+            n(11, Some(10), 50, "old-child"),
+        ];
         let f = build_forest(&nodes, false);
         assert_eq!(roots(&f).len(), 2);
         assert!(f.parent[1].is_none());
@@ -361,7 +432,11 @@ mod tests {
 
     #[test]
     fn cycle_is_cut_and_everything_still_renders() {
-        let nodes = vec![n(1, Some(2), 5, "a"), n(2, Some(1), 5, "b"), n(3, Some(2), 6, "c")];
+        let nodes = vec![
+            n(1, Some(2), 5, "a"),
+            n(2, Some(1), 5, "b"),
+            n(3, Some(2), 6, "c"),
+        ];
         let f = build_forest(&nodes, false);
         assert!(!roots(&f).is_empty());
         let lines = render_tree(&nodes, &f, None, PLAIN, NOCUT);
@@ -372,16 +447,32 @@ mod tests {
     fn selector_parsing() {
         assert_eq!(Selector::parse(None), Selector::SelfProcess);
         assert_eq!(Selector::parse(Some("1234")), Selector::Pid(1234));
-        assert_eq!(Selector::parse(Some("chrome")), Selector::Name("chrome".into()));
+        assert_eq!(
+            Selector::parse(Some("chrome")),
+            Selector::Name("chrome".into())
+        );
     }
 
     #[test]
     fn find_targets_cases() {
-        let nodes = vec![n(1, None, 1, "System"), n(2, Some(1), 2, "Chrome.exe"), n(3, Some(1), 2, "chrome")];
+        let nodes = vec![
+            n(1, None, 1, "System"),
+            n(2, Some(1), 2, "Chrome.exe"),
+            n(3, Some(1), 2, "chrome"),
+        ];
         assert_eq!(find_targets(&nodes, &Selector::Pid(2), None), Ok(vec![1]));
-        assert_eq!(find_targets(&nodes, &Selector::Name("CHROME".into()), None), Ok(vec![1, 2]));
-        assert_eq!(find_targets(&nodes, &Selector::Name("chrome.exe".into()), None), Ok(vec![1, 2]));
-        assert_eq!(find_targets(&nodes, &Selector::SelfProcess, Some(3)), Ok(vec![2]));
+        assert_eq!(
+            find_targets(&nodes, &Selector::Name("CHROME".into()), None),
+            Ok(vec![1, 2])
+        );
+        assert_eq!(
+            find_targets(&nodes, &Selector::Name("chrome.exe".into()), None),
+            Ok(vec![1, 2])
+        );
+        assert_eq!(
+            find_targets(&nodes, &Selector::SelfProcess, Some(3)),
+            Ok(vec![2])
+        );
         assert!(find_targets(&nodes, &Selector::Pid(99), None).is_err());
         assert!(find_targets(&nodes, &Selector::Name("nope".into()), None).is_err());
         assert!(find_targets(&nodes, &Selector::SelfProcess, None).is_err());
@@ -435,11 +526,29 @@ mod tests {
         let keep = select_subset(&f, &[1], true);
 
         // width 16 -> usable 15 cells
-        let cut = render_tree(&nodes, &f, Some(&keep), PLAIN, Layout { width: Some(16), wrap: false });
+        let cut = render_tree(
+            &nodes,
+            &f,
+            Some(&keep),
+            PLAIN,
+            Layout {
+                width: Some(16),
+                wrap: false,
+            },
+        );
         assert_eq!(cut[1], "  └─sshd-with-a");
         assert!(cut.iter().all(|l| display_width(l) <= 15));
 
-        let wrapped = render_tree(&nodes, &f, Some(&keep), PLAIN, Layout { width: Some(16), wrap: true });
+        let wrapped = render_tree(
+            &nodes,
+            &f,
+            Some(&keep),
+            PLAIN,
+            Layout {
+                width: Some(16),
+                wrap: true,
+            },
+        );
         assert_eq!(wrapped[1], "  └─sshd-with-a");
         assert_eq!(wrapped[2], "    -very-long-");
         assert_eq!(wrapped[3], "    name");
@@ -451,7 +560,11 @@ mod tests {
     fn control_chars_are_sanitized() {
         let mut x = n(1, None, 1, "a\nb");
         x.args = "x\ty".to_string();
-        let style = Style { show_pids: false, show_args: true, ascii: false };
+        let style = Style {
+            show_pids: false,
+            show_args: true,
+            ascii: false,
+        };
         assert_eq!(node_label(&x, style), "a b x y");
     }
 }
