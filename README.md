@@ -1,99 +1,44 @@
 # psw - Process Status for Windows
 
-`psw` is a command-line tool for Windows that provides information about the currently running processes, similar to the `ps` command on Linux.
+`psw` is a `ps`-like command-line tool that lists running processes. It is written for Windows
+(it also builds on Linux/macOS via `sysinfo`). Only columns whose values the OS really provides
+are printed; there are no placeholder columns (TTY, PRI, NI, ADDR, WCHAN, F are intentionally absent).
 
-## Features
+## Build
 
-- List processes with various levels of detail.
-- Filter processes by the current user.
-- Gracefully handles errors and processes with missing information.
+```
+cargo build --release
+```
 
 ## Usage
 
-### Default
-
-By default, `psw` lists the processes belonging to the current user.
-
 ```
-psw
+psw [-e] [-l] [-f]
 ```
 
-**Output:**
+| Option | Long | Meaning | Columns |
+|---|---|---|---|
+| (none) | | Current user's processes | `PID TIME CMD` (CMD = process name) |
+| `-e` | `--all` | All users' processes | `UID PID PPID %CPU STIME TIME CMD` (CMD = process name) |
+| `-f` | `--full` | Full format, full command line | `UID PID PPID %CPU STIME TIME CMD` |
+| `-l` | `--long` | Long format, full command line | `STAT UID PID PPID %CPU RSS STIME TIME CMD` |
 
-```
-  PID TTY          TIME CMD
-2523195 pts/2    00:00:00 bash
-3891965 pts/2    00:00:00 psw
-```
+Options can be combined (`-e -l` = all users, long format). Output is sorted by PID and column
+widths adapt to the data.
 
-### Options
+## Column semantics
 
-- `-e`: Select all processes.
-- `-l`: Long format.
-- `-f`: Full format.
+| Column | Meaning |
+|---|---|
+| `TIME` | Accumulated **CPU time** (kernel + user), `HH:MM:SS` (not wall-clock uptime) |
+| `%CPU` | Instantaneous CPU usage sampled over ~200 ms. Relative to one core, so it can exceed 100 on multi-core machines. `-e/-f/-l` wait ~200 ms for this sample; the default mode does not |
+| `RSS` | Resident memory in KiB |
+| `STIME` | Start time: `HH:MM` if started today, otherwise `MonDD` |
+| `STAT` | Process status as reported by the OS |
+| `UID` | User name; falls back to the raw user id if it cannot be resolved, `-` if unavailable |
+| `PPID` | Parent PID, `-` if unknown |
 
-These options can be combined.
+## Errors
 
-#### `-e` - All Processes
-
-Lists all processes running on the system.
-
-```
-psw -e
-```
-
-**Output:**
-
-```
-UID          PID    PPID  C STIME TTY          TIME CMD
-dbsecure 2523195 2523194  0 Aug26 pts/2    00:00:00 -bash
-root     3878164 2523195  0 01:26 pts/2    00:00:00 ps -e
-```
-
-#### `-f` - Full Format
-
-Provides a more detailed output.
-
-```
-psw -f
-```
-
-**Output:**
-
-```
-UID          PID    PPID  C STIME TTY          TIME CMD
-dbsecure 2523195 2523194  0 Aug26 pts/2    00:00:00 -bash
-dbsecure 3878164 2523195  0 01:26 pts/2    00:00:00 ps -f
-```
-
-#### `-l` - Long Format
-
-Provides a long format output with even more details.
-
-```
-psw -l
-```
-
-**Output:**
-
-```
-F S   UID     PID    PPID  C PRI  NI ADDR SZ WCHAN  TTY          TIME CMD
-4 S  1000 2523195 2523194  0  80   0 -  7481 -      pts/2    00:00:00 bash
-0 R  1000 3877235 2523195  0  80   0 - 11377 -      pts/2    00:00:00 ps
-```
-
-#### `-lf` - Combined Long and Full Format
-
-Combines the long and full format options.
-
-```
-psw -lf
-```
-
-**Output:**
-
-```
-F S UID          PID    PPID  C PRI  NI ADDR SZ WCHAN  STIME TTY          TIME CMD
-4 S dbsecure 2523195 2523194  0  80   0 -  7481 -      Aug26 pts/2    00:00:00 -bash
-0 R dbsecure 3875887 2523195  0  80   0 - 14691 -      01:25 pts/2    00:00:00 ps -lf
-```
+If the current user cannot be determined (default mode only), `psw` prints an error to stderr and
+exits with status 1; use `-e` to list all processes. A closed pipe (`psw | head`) exits quietly.
