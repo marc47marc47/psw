@@ -1,11 +1,16 @@
+mod text;
+mod tree;
+
 use chrono::{DateTime, Local, TimeZone};
-use clap::Parser;
-use std::io::{self, BufWriter, Write};
+use clap::{Args, Parser, Subcommand};
+use std::io::{self, BufWriter, IsTerminal, Write};
 use std::process::ExitCode;
 use sysinfo::{
     MINIMUM_CPU_UPDATE_INTERVAL, Pid, Process, ProcessRefreshKind, ProcessesToUpdate, System,
-    Users,
+    UpdateKind, Users,
 };
+use text::{display_width, pad_left, pad_right};
+use tree::{Layout, Selector, Style, TreeNode};
 
 #[derive(Parser)]
 #[command(author, version, about = "ps-like process listing for Windows", long_about = None)]
@@ -21,6 +26,48 @@ struct Cli {
     /// Full format: adds UID/PPID/%CPU/STIME and shows the full command line
     #[arg(short = 'f', long = "full")]
     full: bool,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Show processes as a tree (like pstree)
+    Tree(TreeArgs),
+}
+
+#[derive(Args)]
+struct TreeArgs {
+    /// Show command line arguments
+    #[arg(short = 'a', long = "arguments")]
+    arguments: bool,
+
+    /// Wrap long lines instead of truncating them to the terminal width
+    #[arg(short = 'l', long = "long")]
+    long: bool,
+
+    /// Sort siblings by PID instead of by name
+    #[arg(short = 'n', long = "numeric-sort")]
+    numeric_sort: bool,
+
+    /// Show PIDs
+    #[arg(short = 'p', long = "show-pids")]
+    show_pids: bool,
+
+    /// Also show the parents (ancestors) of the selected processes. Without a PID/NAME argument
+    /// the selected process is psw itself, i.e. "where am I in the process tree?"
+    #[arg(short = 's', long = "show-parents")]
+    show_parents: bool,
+
+    /// Use ASCII line drawing (for consoles that cannot display Unicode box characters)
+    #[arg(short = 'A', long = "ascii")]
+    ascii: bool,
+
+    /// Show only this process and its descendants. A number selects a PID, anything else a
+    /// process name (case-insensitive, ".exe" optional; all matches are shown)
+    #[arg(value_name = "PID|NAME")]
+    selector: Option<String>,
 }
 
 impl Cli {
@@ -151,10 +198,10 @@ fn cell(col: Column, pid: &Pid, p: &Process, ctx: &RowContext) -> String {
 
 /// Renders a header + rows with per-column widths; the last column is never padded.
 fn render_table(cols: &[Column], rows: &[Vec<String>]) -> Vec<String> {
-    let mut widths: Vec<usize> = cols.iter().map(|c| c.header().chars().count()).collect();
+    let mut widths: Vec<usize> = cols.iter().map(|c| display_width(c.header())).collect();
     for row in rows {
         for (w, v) in widths.iter_mut().zip(row) {
-            *w = (*w).max(v.chars().count());
+            *w = (*w).max(display_width(v));
         }
     }
     let fmt_line = |cells: &mut dyn Iterator<Item = &str>| -> String {
@@ -165,9 +212,9 @@ fn render_table(cols: &[Column], rows: &[Vec<String>]) -> Vec<String> {
                 line.push(' ');
             }
             match (cols[i].align(), i == last) {
-                (Align::Right, _) => line.push_str(&format!("{v:>w$}", w = widths[i])),
+                (Align::Right, _) => line.push_str(&pad_left(v, widths[i])),
                 (Align::Left, true) => line.push_str(v),
-                (Align::Left, false) => line.push_str(&format!("{v:<w$}", w = widths[i])),
+                (Align::Left, false) => line.push_str(&pad_right(v, widths[i])),
             }
         }
         line
@@ -180,9 +227,7 @@ fn render_table(cols: &[Column], rows: &[Vec<String>]) -> Vec<String> {
     out
 }
 
-fn main() -> ExitCode {
-    let cli = Cli::parse();
-
+fn run_list(cli: &Cli) -> ExitCode {
     let refresh_kind = ProcessRefreshKind::everything().without_tasks();
     let mut sys = System::new();
     sys.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind);
@@ -214,7 +259,7 @@ fn main() -> ExitCode {
         now: Local::now(),
         full_cmdline: cli.wants_full_cmdline(),
     };
-    let cols = columns_for(&cli);
+    let cols = columns_for(cli);
 
     let mut procs: Vec<(&Pid, &Process)> = sys
         .processes()
@@ -228,8 +273,12 @@ fn main() -> ExitCode {
         .map(|(pid, p)| cols.iter().map(|&c| cell(c, pid, p, &ctx)).collect())
         .collect();
 
+    write_lines(&render_table(&cols, &rows))
+}
+
+fn write_lines(lines: &[String]) -> ExitCode {
     let mut out = BufWriter::new(io::stdout().lock());
-    for line in render_table(&cols, &rows) {
+    for line in lines {
         if let Err(e) = writeln!(out, "{line}") {
             // A closed pipe (e.g. `psw | head`) is a normal way to stop.
             return if e.kind() == io::ErrorKind::BrokenPipe {
@@ -250,12 +299,81 @@ fn main() -> ExitCode {
     }
 }
 
+/// `None` when stdout is not a terminal (pipes/files are never cut or wrapped).
+fn terminal_width() -> Option<usize> {
+    if !io::stdout().is_terminal() {
+        return None;
+    }
+    Some(terminal_size::terminal_size().map_or(80, |(w, _)| usize::from(w.0)))
+}
+
+fn run_tree(args: &TreeArgs) -> ExitCode {
+    let mut kind = ProcessRefreshKind::nothing();
+    if args.arguments {
+        kind = kind.with_cmd(UpdateKind::OnlyIfNotSet);
+    }
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
+
+    let nodes: Vec<TreeNode> = sys
+        .processes()
+        .iter()
+        .map(|(pid, p)| TreeNode {
+            pid: pid.as_u32(),
+            ppid: p.parent().map(Pid::as_u32),
+            start: p.start_time(),
+            name: p.name().to_string_lossy().into_owned(),
+            args: p
+                .cmd()
+                .iter()
+                .skip(1)
+                .map(|a| a.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" "),
+        })
+        .collect();
+
+    let forest = tree::build_forest(&nodes, args.numeric_sort);
+
+    let keep = if args.selector.is_some() || args.show_parents {
+        let selector = Selector::parse(args.selector.as_deref());
+        let self_pid = sysinfo::get_current_pid().ok().map(Pid::as_u32);
+        match tree::find_targets(&nodes, &selector, self_pid) {
+            Ok(targets) => Some(tree::select_subset(&forest, &targets, args.show_parents)),
+            Err(e) => {
+                eprintln!("psw: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        None
+    };
+
+    let style = Style { show_pids: args.show_pids, show_args: args.arguments, ascii: args.ascii };
+    let layout = Layout { width: terminal_width(), wrap: args.long };
+    write_lines(&tree::render_tree(&nodes, &forest, keep.as_deref(), style, layout))
+}
+
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+    match &cli.command {
+        Some(Command::Tree(args)) => {
+            if cli.all || cli.long || cli.full {
+                eprintln!("psw: -e/-l/-f apply to the list view; use the tree options after `tree`");
+                return ExitCode::from(2);
+            }
+            run_tree(args)
+        }
+        None => run_list(&cli),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn cli(e: bool, l: bool, f: bool) -> Cli {
-        Cli { all: e, long: l, full: f }
+        Cli { all: e, long: l, full: f, command: None }
     }
 
     #[test]
