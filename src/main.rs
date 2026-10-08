@@ -123,11 +123,21 @@ impl Column {
     }
 }
 
+/// Windows has no process state concept that `sysinfo` can report: every process comes back as
+/// "Runnable", so a STAT column there would be noise presented as data.
+fn status_is_meaningful() -> bool {
+    !cfg!(windows)
+}
+
 /// Only columns whose value the OS actually provides are emitted (no placeholder columns).
-fn columns_for(cli: &Cli) -> Vec<Column> {
+fn columns_for(cli: &Cli, with_status: bool) -> Vec<Column> {
     use Column::*;
     if cli.long {
-        vec![Stat, Uid, Pid, Ppid, Cpu, Rss, Stime, Time, Cmd]
+        let mut cols = vec![Uid, Pid, Ppid, Cpu, Rss, Stime, Time, Cmd];
+        if with_status {
+            cols.insert(0, Stat);
+        }
+        cols
     } else if cli.full || cli.all {
         vec![Uid, Pid, Ppid, Cpu, Stime, Time, Cmd]
     } else {
@@ -278,7 +288,7 @@ fn run_list(cli: &Cli) -> ExitCode {
         now: Local::now(),
         full_cmdline: cli.wants_full_cmdline(),
     };
-    let cols = columns_for(cli);
+    let cols = columns_for(cli, status_is_meaningful());
 
     let mut procs: Vec<(&Pid, &Process)> = sys
         .processes()
@@ -454,16 +464,25 @@ mod tests {
     #[test]
     fn column_selection() {
         use Column::*;
-        assert_eq!(columns_for(&cli(false, false, false)), vec![Pid, Time, Cmd]);
-        assert_eq!(
-            columns_for(&cli(true, false, false)),
-            columns_for(&cli(false, false, true))
-        );
-        assert_eq!(columns_for(&cli(false, true, false)).len(), 9);
-        assert_eq!(
-            columns_for(&cli(true, true, true)),
-            columns_for(&cli(false, true, false))
-        );
+        for status in [true, false] {
+            assert_eq!(
+                columns_for(&cli(false, false, false), status),
+                vec![Pid, Time, Cmd]
+            );
+            assert_eq!(
+                columns_for(&cli(true, false, false), status),
+                columns_for(&cli(false, false, true), status)
+            );
+            assert_eq!(
+                columns_for(&cli(true, true, true), status),
+                columns_for(&cli(false, true, false), status)
+            );
+        }
+        assert_eq!(columns_for(&cli(false, true, false), true).len(), 9);
+        assert_eq!(columns_for(&cli(false, true, false), true)[0], Stat);
+        let no_status = columns_for(&cli(false, true, false), false);
+        assert_eq!(no_status.len(), 8);
+        assert!(!no_status.contains(&Stat));
         assert!(!cli(false, false, false).wants_cpu_percent());
         assert!(cli(true, false, false).wants_cpu_percent());
         assert!(!cli(true, false, false).wants_full_cmdline());

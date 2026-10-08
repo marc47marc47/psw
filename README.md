@@ -21,7 +21,7 @@ psw [-e] [-l] [-f]
 | (none) | | Current user's processes | `PID TIME CMD` (CMD = process name) |
 | `-e` | `--all` | All users' processes | `UID PID PPID %CPU STIME TIME CMD` (CMD = process name) |
 | `-f` | `--full` | Full format, full command line | `UID PID PPID %CPU STIME TIME CMD` |
-| `-l` | `--long` | Long format, full command line | `STAT UID PID PPID %CPU RSS STIME TIME CMD` |
+| `-l` | `--long` | Long format, full command line | `STAT UID PID PPID %CPU RSS STIME TIME CMD` (no `STAT` on Windows) |
 
 Options can be combined (`-e -l` = all users, long format). Output is sorted by PID and column
 widths adapt to the data.
@@ -34,7 +34,7 @@ widths adapt to the data.
 | `%CPU` | Instantaneous CPU usage sampled over ~200 ms. Relative to one core, so it can exceed 100 on multi-core machines. `-e/-f/-l` wait ~200 ms for this sample; the default mode does not |
 | `RSS` | Resident memory in KiB |
 | `STIME` | Start time: `HH:MM` if started today, otherwise `MonDD` |
-| `STAT` | Process status as reported by the OS |
+| `STAT` | Process status as reported by the OS. **Not shown on Windows**: the OS API behind `sysinfo` has no per-process state, every process would read "Runnable" |
 | `UID` | User name; falls back to the raw user id if it cannot be resolved, `-` if unavailable |
 | `PPID` | Parent PID, `-` if unknown |
 
