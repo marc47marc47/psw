@@ -1,7 +1,17 @@
 [package]
-name = "psw"
+name = "psw-cli"
 version = "0.1.0"
 edition = "2024"
+description = "A ps-like process lister for Windows (also builds on Linux/macOS), with a pstree-style 'tree' subcommand"
+readme = "README.md"
+repository = "https://github.com/marc47marc47/psw"
+license = "MIT"
+keywords = ["ps", "process", "windows", "cli", "pstree"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "psw"
+path = "src/main.rs"
 
 [dependencies]
 chrono = "0.4.41"

@@ -353,7 +353,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "psw"
+name = "psw-cli"
 version = "0.1.0"
 dependencies = [
  "chrono",
