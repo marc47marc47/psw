@@ -18,7 +18,7 @@ jobs:
       matrix:
         os: [windows-latest, ubuntu-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust (stable)
         shell: bash
@@ -27,7 +27,7 @@ jobs:
           rustup default stable
           rustc --version
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -68,6 +68,20 @@ jobs:
             out=$("$PSW" $opt); echo "$out" | head -3
             [ "$(echo "$out" | wc -l)" -ge 2 ] || fail "psw $opt: no rows"
           done
+
+          echo "--- STAT column: absent on Windows, present elsewhere"
+          header=$("$PSW" -l | head -1)
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            echo "$header" | grep -q 'STAT' && fail "STAT must not be shown on Windows"
+          else
+            echo "$header" | grep -q '^STAT' || fail "STAT column missing"
+          fi
+          echo "$header" | grep -q 'RSS' || fail "-l header incomplete"
+
+          echo "--- no doubled brackets / 1970 start times in -e -l -f"
+          out=$("$PSW" -e -l -f)
+          echo "$out" | grep -q '\[\[System Process\]\]' && fail "doubled brackets in CMD"
+          echo "$out" | grep -q 'Jan01' && fail "unknown start time shown as Jan01"
 
           echo "--- psw -e must contain this runner's own shell and psw's parent chain"
           "$PSW" -e | grep -qi 'bash\|pwsh\|powershell\|cmd' || fail "no shell process in -e output"
