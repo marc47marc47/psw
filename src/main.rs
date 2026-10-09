@@ -1,167 +1,477 @@
-use chrono::{Local, TimeZone};
-use clap::Parser;
-use std::io::{self, Write};
-use sysinfo::{System, SystemExt, UserExt, ProcessExt, Pid};
+mod text;
+mod tree;
+
+use chrono::{DateTime, Local, TimeZone};
+use clap::{Args, Parser, Subcommand};
+use std::io::{self, BufWriter, IsTerminal, Write};
+use std::process::ExitCode;
+use sysinfo::{
+    MINIMUM_CPU_UPDATE_INTERVAL, Pid, Process, ProcessRefreshKind, ProcessesToUpdate, System,
+    UpdateKind, Users,
+};
+use text::{display_width, pad_left, pad_right};
+use tree::{Layout, Selector, Style, TreeNode};
 
 #[derive(Parser)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version, about = "ps-like process listing for Windows", long_about = None)]
 struct Cli {
-    #[arg(short, long)]
-    e: bool,
+    /// Select all processes (default: only the current user's)
+    #[arg(short = 'e', long = "all")]
+    all: bool,
 
-    #[arg(short, long)]
-    l: bool,
+    /// Long format: adds process status and resident memory (RSS)
+    #[arg(short = 'l', long = "long")]
+    long: bool,
 
-    #[arg(short, long)]
-    f: bool,
+    /// Full format: adds UID/PPID/%CPU/STIME and shows the full command line
+    #[arg(short = 'f', long = "full")]
+    full: bool,
+
+    #[command(subcommand)]
+    command: Option<Command>,
 }
 
-fn main() {
-    let cli = Cli::parse();
+#[derive(Subcommand)]
+enum Command {
+    /// Show processes as a tree (like pstree)
+    Tree(TreeArgs),
+}
 
-    let mut sys = System::new_all();
-    sys.refresh_all();
+#[derive(Args)]
+struct TreeArgs {
+    /// Show command line arguments
+    #[arg(short = 'a', long = "arguments")]
+    arguments: bool,
 
-    let users = sys.users();
+    /// Wrap long lines instead of truncating them to the terminal width
+    #[arg(short = 'l', long = "long")]
+    long: bool,
 
-    if cli.l && cli.f {
-        if writeln!(
-            io::stdout(),
-            "{:1} {:1} {:<12} {:>5} {:>5} {:>2} {:>3} {:>3} {:>4} {:>7} {:<6} {:<8} {:<12} {:<8} {}",
-            "F", "S", "UID", "PID", "PPID", "C", "PRI", "NI", "ADDR", "SZ", "WCHAN", "STIME", "TTY", "TIME", "CMD"
-        ).is_err() {
-            return;
-        }
-    } else if cli.l {
-        if writeln!(
-            io::stdout(),
-            "{:1} {:1} {:<8} {:>5} {:>5} {:>2} {:>3} {:>3} {:>4} {:>7} {:<6} {:<8} {:<8} {:<8} {}",
-            "F", "S", "UID", "PID", "PPID", "C", "PRI", "NI", "ADDR", "SZ", "WCHAN", "STIME", "TTY", "TIME", "CMD"
-        ).is_err() {
-            return;
-        }
-    } else if cli.f || cli.e {
-        if writeln!(
-            io::stdout(),
-            "{: <12} {: >5} {: >5} {: >2} {: <8} {: <12} {: <8} {}",
-            "UID", "PID", "PPID", "C", "STIME", "TTY", "TIME", "CMD"
-        ).is_err() {
-            return;
-        }
-    } else {
-        if writeln!(io::stdout(), "{: >5} {: <12} {: <8} {}", "PID", "TTY", "TIME", "CMD").is_err() {
-            return;
+    /// Sort siblings by PID instead of by name
+    #[arg(short = 'n', long = "numeric-sort")]
+    numeric_sort: bool,
+
+    /// Show PIDs
+    #[arg(short = 'p', long = "show-pids")]
+    show_pids: bool,
+
+    /// Also show the parents (ancestors) of the selected processes. Without a PID/NAME argument
+    /// the selected process is psw itself, i.e. "where am I in the process tree?"
+    #[arg(short = 's', long = "show-parents")]
+    show_parents: bool,
+
+    /// Use ASCII line drawing (for consoles that cannot display Unicode box characters)
+    #[arg(short = 'A', long = "ascii")]
+    ascii: bool,
+
+    /// Show only this process and its descendants. A number selects a PID, anything else a
+    /// process name (case-insensitive, ".exe" optional; all matches are shown)
+    #[arg(value_name = "PID|NAME")]
+    selector: Option<String>,
+}
+
+impl Cli {
+    /// `%CPU` is a rate, so it needs two samples; only pay that delay when it is displayed.
+    fn wants_cpu_percent(&self) -> bool {
+        self.all || self.long || self.full
+    }
+
+    fn wants_full_cmdline(&self) -> bool {
+        self.long || self.full
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Column {
+    Stat,
+    Uid,
+    Pid,
+    Ppid,
+    Cpu,
+    Rss,
+    Stime,
+    Time,
+    Cmd,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Align {
+    Left,
+    Right,
+}
+
+impl Column {
+    fn header(self) -> &'static str {
+        match self {
+            Column::Stat => "STAT",
+            Column::Uid => "UID",
+            Column::Pid => "PID",
+            Column::Ppid => "PPID",
+            Column::Cpu => "%CPU",
+            Column::Rss => "RSS",
+            Column::Stime => "STIME",
+            Column::Time => "TIME",
+            Column::Cmd => "CMD",
         }
     }
 
-    let current_pid = std::process::id();
-    let current_user_id = sys.process(Pid::from(current_pid as usize)).unwrap().user_id().unwrap();
-
-    for (pid, process) in sys.processes() {
-        if !cli.e && process.user_id() != Some(current_user_id) {
-            continue;
+    fn align(self) -> Align {
+        match self {
+            Column::Pid | Column::Ppid | Column::Cpu | Column::Rss => Align::Right,
+            _ => Align::Left,
         }
+    }
+}
 
-        let user_name = match process.user_id() {
-            Some(user_id) => users
-                .iter()
-                .find(|u| u.id() == user_id)
+/// Only columns whose value the OS actually provides are emitted (no placeholder columns).
+fn columns_for(cli: &Cli) -> Vec<Column> {
+    use Column::*;
+    if cli.long {
+        vec![Stat, Uid, Pid, Ppid, Cpu, Rss, Stime, Time, Cmd]
+    } else if cli.full || cli.all {
+        vec![Uid, Pid, Ppid, Cpu, Stime, Time, Cmd]
+    } else {
+        vec![Pid, Time, Cmd]
+    }
+}
+
+/// `HH:MM:SS` from milliseconds (hours are not wrapped at 24).
+fn format_cpu_time(millis: u64) -> String {
+    let total = millis / 1000;
+    format!(
+        "{:02}:{:02}:{:02}",
+        total / 3600,
+        (total % 3600) / 60,
+        total % 60
+    )
+}
+
+/// `HH:MM` for processes started today, `MonDD` otherwise (like `ps`).
+fn format_start_time(start_epoch_secs: u64, now: DateTime<Local>) -> String {
+    let Ok(secs) = i64::try_from(start_epoch_secs) else {
+        return "-".to_string();
+    };
+    match Local.timestamp_opt(secs, 0).single() {
+        Some(t) if t.date_naive() == now.date_naive() => t.format("%H:%M").to_string(),
+        Some(t) => t.format("%b%d").to_string(),
+        None => "-".to_string(),
+    }
+}
+
+fn format_cmd(process: &Process, full: bool) -> String {
+    let name = process.name().to_string_lossy();
+    if !full {
+        return name.into_owned();
+    }
+    if process.cmd().is_empty() {
+        return format!("[{name}]");
+    }
+    process
+        .cmd()
+        .iter()
+        .map(|a| a.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+struct RowContext<'a> {
+    users: &'a Users,
+    now: DateTime<Local>,
+    full_cmdline: bool,
+}
+
+fn cell(col: Column, pid: &Pid, p: &Process, ctx: &RowContext) -> String {
+    match col {
+        Column::Stat => p.status().to_string(),
+        Column::Uid => match p.user_id() {
+            Some(uid) => ctx
+                .users
+                .get_user_by_id(uid)
                 .map(|u| u.name().to_string())
-                .unwrap_or_else(|| "-".to_string()),
+                .unwrap_or_else(|| uid.to_string()),
             None => "-".to_string(),
-        };
+        },
+        Column::Pid => pid.to_string(),
+        Column::Ppid => p
+            .parent()
+            .map_or_else(|| "-".to_string(), |pp| pp.to_string()),
+        Column::Cpu => format!("{:.1}", p.cpu_usage()),
+        Column::Rss => (p.memory() / 1024).to_string(),
+        Column::Stime => format_start_time(p.start_time(), ctx.now),
+        Column::Time => format_cpu_time(p.accumulated_cpu_time()),
+        Column::Cmd => format_cmd(p, ctx.full_cmdline),
+    }
+}
 
-        let start_time = Local.timestamp_opt(process.start_time() as i64, 0).unwrap();
-        let total_run_time = process.run_time();
-        let hours = total_run_time / 3600;
-        let minutes = (total_run_time % 3600) / 60;
-        let seconds = total_run_time % 60;
-
-        let cmd = if process.cmd().is_empty() {
-            format!("[{}]", process.name())
-        } else {
-            process.cmd().join(" ")
-        };
-
-        let display_cmd = if cli.f || cli.l {
-            cmd
-        } else {
-            process.name().to_string()
-        };
-
-        let result = if cli.l && cli.f {
-            writeln!(
-                io::stdout(),
-                "{:1} {:1} {:<12} {:>5} {:>5} {:>2} {:>3} {:>3} {:>4} {:>7} {:<6} {:<8} {:<12} {:02}:{:02}:{:02} {}",
-                "4",
-                process.status().to_string(),
-                user_name,
-                pid,
-                process.parent().unwrap_or(Pid::from(0)),
-                (process.cpu_usage() * 100.0) as u8,
-                "80",
-                "0",
-                "-",
-                process.memory() / 1024,
-                "-",
-                start_time.format("%b%d"),
-                "?",
-                hours,
-                minutes,
-                seconds,
-                display_cmd
-            )
-        } else if cli.l {
-            writeln!(
-                io::stdout(),
-                "{:1} {:1} {:<8} {:>5} {:>5} {:>2} {:>3} {:>3} {:>4} {:>7} {:<6} {:<8} {:<8} {:02}:{:02}:{:02} {}",
-                "4",
-                process.status().to_string(),
-                user_name,
-                pid,
-                process.parent().unwrap_or(Pid::from(0)),
-                (process.cpu_usage() * 100.0) as u8,
-                "80",
-                "0",
-                "-",
-                process.memory() / 1024,
-                "-",
-                start_time.format("%b%d"),
-                "?",
-                hours,
-                minutes,
-                seconds,
-                display_cmd
-            )
-        } else if cli.f || cli.e {
-            writeln!(
-                io::stdout(),
-                "{: <12} {: >5} {: >5} {: >2} {: <8} {: <12} {:02}:{:02}:{:02} {}",
-                user_name,
-                pid,
-                process.parent().unwrap_or(Pid::from(0)),
-                (process.cpu_usage() * 100.0) as u8,
-                start_time.format("%b%d"),
-                "?",
-                hours,
-                minutes,
-                seconds,
-                display_cmd
-            )
-        } else {
-            writeln!(
-                io::stdout(),
-                "{: >5} {: <12} {:02}:{:02}:{:02} {}",
-                pid,
-                "?",
-                hours,
-                minutes,
-                seconds,
-                display_cmd
-            )
-        };
-        if result.is_err() {
-            break;
+/// Renders a header + rows with per-column widths; the last column is never padded.
+fn render_table(cols: &[Column], rows: &[Vec<String>]) -> Vec<String> {
+    let mut widths: Vec<usize> = cols.iter().map(|c| display_width(c.header())).collect();
+    for row in rows {
+        for (w, v) in widths.iter_mut().zip(row) {
+            *w = (*w).max(display_width(v));
         }
+    }
+    let fmt_line = |cells: &mut dyn Iterator<Item = &str>| -> String {
+        let mut line = String::new();
+        let last = cols.len() - 1;
+        for (i, v) in cells.enumerate() {
+            if i > 0 {
+                line.push(' ');
+            }
+            match (cols[i].align(), i == last) {
+                (Align::Right, _) => line.push_str(&pad_left(v, widths[i])),
+                (Align::Left, true) => line.push_str(v),
+                (Align::Left, false) => line.push_str(&pad_right(v, widths[i])),
+            }
+        }
+        line
+    };
+    let mut out = Vec::with_capacity(rows.len() + 1);
+    out.push(fmt_line(&mut cols.iter().map(|c| c.header())));
+    for row in rows {
+        out.push(fmt_line(&mut row.iter().map(String::as_str)));
+    }
+    out
+}
+
+fn run_list(cli: &Cli) -> ExitCode {
+    let refresh_kind = ProcessRefreshKind::everything().without_tasks();
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind);
+    if cli.wants_cpu_percent() {
+        // cpu_usage() is a delta between two refreshes; a single refresh always yields 0.
+        std::thread::sleep(MINIMUM_CPU_UPDATE_INTERVAL);
+        sys.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind);
+    }
+
+    let current_uid = if cli.all {
+        None
+    } else {
+        let uid = sysinfo::get_current_pid()
+            .ok()
+            .and_then(|pid| sys.process(pid))
+            .and_then(|p| p.user_id());
+        match uid {
+            Some(uid) => Some(uid.clone()),
+            None => {
+                eprintln!("psw: cannot determine the current user; use -e to list all processes");
+                return ExitCode::FAILURE;
+            }
+        }
+    };
+
+    let users = Users::new_with_refreshed_list();
+    let ctx = RowContext {
+        users: &users,
+        now: Local::now(),
+        full_cmdline: cli.wants_full_cmdline(),
+    };
+    let cols = columns_for(cli);
+
+    let mut procs: Vec<(&Pid, &Process)> = sys
+        .processes()
+        .iter()
+        .filter(|(_, p)| {
+            current_uid
+                .as_ref()
+                .is_none_or(|uid| p.user_id() == Some(uid))
+        })
+        .collect();
+    procs.sort_by_key(|(pid, _)| **pid);
+
+    let rows: Vec<Vec<String>> = procs
+        .iter()
+        .map(|(pid, p)| cols.iter().map(|&c| cell(c, pid, p, &ctx)).collect())
+        .collect();
+
+    write_lines(&render_table(&cols, &rows))
+}
+
+fn write_lines(lines: &[String]) -> ExitCode {
+    let mut out = BufWriter::new(io::stdout().lock());
+    for line in lines {
+        if let Err(e) = writeln!(out, "{line}") {
+            // A closed pipe (e.g. `psw | head`) is a normal way to stop.
+            return if e.kind() == io::ErrorKind::BrokenPipe {
+                ExitCode::SUCCESS
+            } else {
+                eprintln!("psw: write error: {e}");
+                ExitCode::FAILURE
+            };
+        }
+    }
+    match out.flush() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("psw: write error: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `None` when stdout is not a terminal (pipes/files are never cut or wrapped).
+fn terminal_width() -> Option<usize> {
+    if !io::stdout().is_terminal() {
+        return None;
+    }
+    Some(terminal_size::terminal_size().map_or(80, |(w, _)| usize::from(w.0)))
+}
+
+fn run_tree(args: &TreeArgs) -> ExitCode {
+    let mut kind = ProcessRefreshKind::nothing();
+    if args.arguments {
+        kind = kind.with_cmd(UpdateKind::OnlyIfNotSet);
+    }
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
+
+    let nodes: Vec<TreeNode> = sys
+        .processes()
+        .iter()
+        .map(|(pid, p)| TreeNode {
+            pid: pid.as_u32(),
+            ppid: p.parent().map(Pid::as_u32),
+            start: p.start_time(),
+            name: p.name().to_string_lossy().into_owned(),
+            args: p
+                .cmd()
+                .iter()
+                .skip(1)
+                .map(|a| a.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" "),
+        })
+        .collect();
+
+    let forest = tree::build_forest(&nodes, args.numeric_sort);
+
+    let keep = if args.selector.is_some() || args.show_parents {
+        let selector = Selector::parse(args.selector.as_deref());
+        let self_pid = sysinfo::get_current_pid().ok().map(Pid::as_u32);
+        match tree::find_targets(&nodes, &selector, self_pid) {
+            Ok(targets) => Some(tree::select_subset(&forest, &targets, args.show_parents)),
+            Err(e) => {
+                eprintln!("psw: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        None
+    };
+
+    let style = Style {
+        show_pids: args.show_pids,
+        show_args: args.arguments,
+        ascii: args.ascii,
+    };
+    let layout = Layout {
+        width: terminal_width(),
+        wrap: args.long,
+    };
+    write_lines(&tree::render_tree(
+        &nodes,
+        &forest,
+        keep.as_deref(),
+        style,
+        layout,
+    ))
+}
+
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+    match &cli.command {
+        Some(Command::Tree(args)) => {
+            if cli.all || cli.long || cli.full {
+                eprintln!(
+                    "psw: -e/-l/-f apply to the list view; use the tree options after `tree`"
+                );
+                return ExitCode::from(2);
+            }
+            run_tree(args)
+        }
+        None => run_list(&cli),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cli(e: bool, l: bool, f: bool) -> Cli {
+        Cli {
+            all: e,
+            long: l,
+            full: f,
+            command: None,
+        }
+    }
+
+    #[test]
+    fn cpu_time_formatting() {
+        assert_eq!(format_cpu_time(0), "00:00:00");
+        assert_eq!(format_cpu_time(999), "00:00:00");
+        assert_eq!(format_cpu_time(3_725_000), "01:02:05");
+        assert_eq!(format_cpu_time(100 * 3_600_000), "100:00:00");
+    }
+
+    #[test]
+    fn start_time_today_vs_older() {
+        let now = Local.with_ymd_and_hms(2026, 3, 15, 12, 0, 0).unwrap();
+        let today = Local
+            .with_ymd_and_hms(2026, 3, 15, 8, 5, 0)
+            .unwrap()
+            .timestamp() as u64;
+        let older = Local
+            .with_ymd_and_hms(2026, 3, 1, 8, 5, 0)
+            .unwrap()
+            .timestamp() as u64;
+        assert_eq!(format_start_time(today, now), "08:05");
+        assert_eq!(format_start_time(older, now), "Mar01");
+        assert_eq!(format_start_time(u64::MAX, now), "-");
+    }
+
+    #[test]
+    fn column_selection() {
+        use Column::*;
+        assert_eq!(columns_for(&cli(false, false, false)), vec![Pid, Time, Cmd]);
+        assert_eq!(
+            columns_for(&cli(true, false, false)),
+            columns_for(&cli(false, false, true))
+        );
+        assert_eq!(columns_for(&cli(false, true, false)).len(), 9);
+        assert_eq!(
+            columns_for(&cli(true, true, true)),
+            columns_for(&cli(false, true, false))
+        );
+        assert!(!cli(false, false, false).wants_cpu_percent());
+        assert!(cli(true, false, false).wants_cpu_percent());
+        assert!(!cli(true, false, false).wants_full_cmdline());
+        assert!(cli(false, true, false).wants_full_cmdline());
+    }
+
+    #[test]
+    fn table_alignment() {
+        let cols = [Column::Pid, Column::Time, Column::Cmd];
+        let rows = vec![
+            vec![
+                "4".to_string(),
+                "00:00:01".to_string(),
+                "System".to_string(),
+            ],
+            vec![
+                "12345".to_string(),
+                "01:00:00".to_string(),
+                "a b c".to_string(),
+            ],
+        ];
+        assert_eq!(
+            render_table(&cols, &rows),
+            vec![
+                "  PID TIME     CMD",
+                "    4 00:00:01 System",
+                "12345 01:00:00 a b c",
+            ]
+        );
     }
 }
